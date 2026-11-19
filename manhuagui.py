@@ -13,17 +13,18 @@ from types import SimpleNamespace
 HTTP_HEADER = {
     'accept': 'image/webp,image/apng,image/*,*/*;q=0.8',
     'accept-encoding': 'gzip, deflate, br',
-    'accept-language': 'zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7,zh-CN;q=0.6',
+    'accept-language': 'zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7',
     'cache-control': 'no-cache',
     'pragma': 'no-cache',
     'referer': 'https://www.manhuagui.com/',
+    'sec-ch-ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+    'sec-ch-ua-mobile': '?0',
+    'sec-ch-ua-platform': '"macOS"',
     'sec-fetch-dest': 'image',
     'sec-fetch-mode': 'no-cors',
     'sec-fetch-site': 'cross-site',
-    'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/81.0.4044.129 Safari/537.36'
+    'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 }
-
-
 
 class manhuagui_comic:
     _CHANNEL_BASE = '.hamreus.com' # image bed base
@@ -35,7 +36,7 @@ class manhuagui_comic:
         self._comic_url_base = self._host + '/comic/'
         
         self._bid = bid # book id
-        self._url = self._comic_url_base + str(bid) # comic url
+        self._url = self._comic_url_base + str(bid) + '/' # comic url
         self._convert = convert # convert to jpg
         self._page_delay = page_delay # delay between pages
 
@@ -44,7 +45,7 @@ class manhuagui_comic:
         except:
             raise Exception('tunnel %d not exists' % tunnel)
         
-        
+
         self._proxies = proxies # proxy host settings
         # if: proxy is on and proxy config is not null
         # check: proxy mode
@@ -57,8 +58,8 @@ class manhuagui_comic:
 
         # initialize metadata
         self._load_book_metadata()
-    
-    
+
+
     def _load_book_metadata(self): # load book info
         try:
             res = None
@@ -129,6 +130,7 @@ class manhuagui_comic:
                 'bid': self._bid,
             }
             json.dump(config, f, ensure_ascii=False, indent=4)
+
     #private functions
     def _requests_get(self, *args, **kwargs): # requests wrapper of switch proxy config
         if self._proxy_config['mode'] == 'single':
@@ -147,48 +149,7 @@ class manhuagui_comic:
         m = re.match(r'^.*\}\(\'(.*)\',(\d*),(\d*),\'([\w|\+|\/|=]*)\'.*$', res.text)
         return _packed(m.group(1), int(m.group(2)), int(m.group(3)), lz.decompressFromBase64(m.group(4)).split('|'))
 
-    def _download_page(self, url : str, e, m, rawfolder, jpgfolder, filename, max_retry=10, retry_interval=2):
-        if self._skip_existed and os.path.isfile(os.path.join(rawfolder, filename)):
-            # return True if file skipped
-            return True
-        
-        for i in range(max_retry):
-            try:
-                res = None
-                res = self._requests_get(url, params={'e': e, 'm': m}, headers=HTTP_HEADER, timeout=10) # download image
-                res.raise_for_status()
-            except Exception as e:
-                print(f"Page {filename} download failed: {res.status_code if res else 'OTHER'} Retry: ({i + 1}/{max_retry})...")
-                time.sleep(retry_interval)
-                continue
-            
-            # save image file
-            file = open(os.path.join(rawfolder, filename), 'wb')
-            for chunk in res.iter_content(100000):
-                file.write(chunk)
-            file.close()
-
-            # convert webp to jpg
-            if self._convert:
-                im = Image.open(os.path.join(rawfolder, filename))
-                im.save(os.path.join(jpgfolder, filename + '.jpg'), 'jpeg')
-
-            # return when success
-            return
-        
-        # if failed
-        raise Exception('Network error: %s' % res.status_code if res else 'OTHER')
-
-    def _download_chapter(self, url : str): # download chapter
-        """Download a chapter
-
-        params:
-            url : /comic/xxxxx/xxxxx.html
-        
-        return:
-            yield (page_url, filename, total_page_count, current_page)
-        """
-
+    def _download_chapter(self, url : str):
         # load chapter info
         chapter_info = self._get_chapter_struct(url)
 
@@ -221,12 +182,66 @@ class manhuagui_comic:
         # download pages
         for i, filename in enumerate(chapter_info['files']):
             page_url = self._tunnel + path + filename
-            yield (page_url, filename, length, i) # report progress
-            # download image
-            if not self._download_page(page_url, e, m, rawfolder, jpgfolder, f'{i}_{filename}'): # return True means file skiped
-                time.sleep(self._page_delay) # delay when file is not skiped
+            
+            # 清理檔名副檔名（將類似 152.jpg.webp 的髒檔名剝除乾淨）
+            base_filename = os.path.splitext(filename)[0]
+            while os.path.splitext(base_filename)[1]:
+                base_filename = os.path.splitext(base_filename)[0]
 
-    
+            if self._convert:
+                clean_filename = base_filename
+            else:
+                clean_filename = base_filename + '.webp'
+
+            yield (page_url, clean_filename, length, i)
+            
+            success = False
+            max_retry = 10
+            for retry in range(max_retry):
+                res = None
+                try:
+                    file_path = os.path.join(rawfolder, clean_filename)
+                    if self._skip_existed and os.path.isfile(file_path):
+                        success = True
+                        break
+                        
+                    res = self._requests_get(page_url, params={'e': e, 'm': m}, headers=HTTP_HEADER, timeout=15)
+                    res.raise_for_status()
+                    
+                    with open(file_path, 'wb') as f:
+                        for chunk in res.iter_content(100000):
+                            f.write(chunk)
+                            
+                    if self._convert:
+                        im = Image.open(file_path)
+                        im.save(os.path.join(jpgfolder, base_filename + '.jpg'), 'jpeg')
+                        
+                    success = True
+                    break
+                except Exception as err:
+                    status_code = res.status_code if res is not None else 'ERROR'
+                    print(f"Page {clean_filename} download failed: {status_code} Retry: ({retry + 1}/{max_retry})...")
+                    
+                    if retry == 2:
+                        print("-> 偵測到 Token 可能過期，正在重新取得最新 e & m 參數...")
+                        try:
+                            fresh_info = self._get_chapter_struct(url)
+                            if fresh_info and 'sl' in fresh_info:
+                                e = fresh_info['sl']['e']
+                                m = fresh_info['sl']['m']
+                                path = fresh_info['path']
+                                page_url = self._tunnel + path + filename
+                                print("-> 成功更新 Token，繼續下載！")
+                        except Exception as ref_err:
+                            print(f"-> 更新 Token 失敗: {ref_err}")
+                            
+                    time.sleep(2)
+            
+            if not success:
+                raise Exception(f'Network error: Failed to download page {clean_filename}')
+                
+            time.sleep(self._page_delay)
+
     def download_chapter(self, index, callback=None, by='chapters', section=None):
         """Download a chapter, by index in chapters or section.chapters
         

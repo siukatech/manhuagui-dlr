@@ -1,2 +1,5 @@
 __pycache__
 Downloads
+.DS_Store
+bak
+venv

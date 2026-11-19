@@ -14,7 +14,16 @@ except:
 
 # create book object
 # 如有調整轉檔、proxy、下載間隔時間、線路分流等需求，請修改以下的建構參數
-manhuagui_book = manhuagui.manhuagui_comic(checked_id)
+manhuagui_book = manhuagui.manhuagui_comic(checked_id
+    , 
+    # proxies: list = None,
+    # proxy_config: dict = { 'mode': 'none','verify': True },
+    # convert: bool = True,
+    # tunnel: int = 0,
+    skip_existed = True,
+    page_delay = 0.5
+    # , subdomain: str = 'tw'
+)
 chapters = manhuagui_book.metadata.chapters
 
 print('編號\t章節名稱')
