@@ -31,13 +31,14 @@ class manhuagui_comic:
     _CHANNELS = ['i', 'eu', 'us']
     _DOWNLOAD_FOLDER = 'Downloads'
 
-    def __init__(self, bid : int, proxies : list=None, proxy_config : dict={'mode': 'none', 'verify': True}, convert : bool=True, tunnel : int=0, skip_existed : bool=False, page_delay : float=0.5, subdomain : str='tw'):
+    def __init__(self, bid : int, proxies : list=None, proxy_config : dict={'mode': 'none', 'verify': True}, convert : bool=True, convert_format : str=None, tunnel : int=0, skip_existed : bool=False, page_delay : float=0.5, subdomain : str='tw'):
         self._host = f"https://{subdomain}.manhuagui.com"
         self._comic_url_base = self._host + '/comic/'
         
         self._bid = bid # book id
         self._url = self._comic_url_base + str(bid) + '/' # comic url
         self._convert = convert # convert image according to extension
+        self._convert_format = convert_format # force target format (e.g. 'jpg', 'png', 'webp'), None means follow inner extension
         self._page_delay = page_delay # delay between pages
 
         try:
@@ -167,16 +168,23 @@ class manhuagui_comic:
             '.avif': 'AVIF',
         }
 
-        if inner_ext.lower() in ext_to_pil:
+        # 決定乾淨嘅主檔名（若為雙層圖片副檔名如 001.png.webp，主檔名為 001；否則為 stem）
+        base_name = inner_stem if inner_ext.lower() in ext_to_pil else stem
+
+        if self._convert_format:
+            # 強行使用使用者指定嘅 format（支援 'jpg' 或 '.jpg'），忽略內層副檔名
+            forced_ext = self._convert_format.strip().lower()
+            if not forced_ext.startswith('.'):
+                forced_ext = '.' + forced_ext
+            target_ext = forced_ext
+        elif inner_ext.lower() in ext_to_pil:
             # 雙層副檔名情況（例如 001.jpg.webp 或 001.png.webp）：跟隨內層副檔名轉換
-            base_name = inner_stem
             target_ext = inner_ext.lower()
         else:
-            # 單層副檔名情況（例如 001.webp 或 001.avif）：convert=True 時預設轉為 .jpg
-            base_name = stem
+            # 單層副檔名情況（例如 001.webp 或 001.avif）：convert=True 且未指定 format 時預設轉為 .jpg
             target_ext = '.jpg'
 
-        pil_format = ext_to_pil.get(target_ext, 'JPEG')
+        pil_format = ext_to_pil.get(target_ext, target_ext.lstrip('.').upper())
         converted_filename = base_name + target_ext
         return converted_filename, pil_format
 
@@ -199,7 +207,18 @@ class manhuagui_comic:
         # make dir
         rawfolder = os.path.join(self._DOWNLOAD_FOLDER, legal_path_bookname, 'raw', legal_path_chaptername)
         os.makedirs(rawfolder, exist_ok=True)
-        jpgfolder = os.path.join(self._DOWNLOAD_FOLDER, legal_path_bookname, 'jpg', legal_path_chaptername)
+
+        # 依最終 convert format 決定整章節統一的轉檔資料夾名稱（預設為 'jpg'）
+        convert_folder_name = 'jpg'
+        if self._convert_format:
+            convert_folder_name = self._convert_format.strip().lstrip('.').lower() or 'jpg'
+        elif chapter_info.get('files'):
+            first_converted_name, _ = self._resolve_output_names(chapter_info['files'][0])
+            first_ext = os.path.splitext(first_converted_name)[1].lstrip('.').lower()
+            if first_ext:
+                convert_folder_name = first_ext
+
+        jpgfolder = os.path.join(self._DOWNLOAD_FOLDER, legal_path_bookname, convert_folder_name, legal_path_chaptername)
         os.makedirs(jpgfolder, exist_ok=True)
 
         # get chapter info
@@ -215,7 +234,7 @@ class manhuagui_comic:
             page_url = self._tunnel + path + filename
 
             # 根據 convert 設定決定檔名：
-            # convert = True  -> raw 保留原始 filename，jpgfolder 依副檔名轉換輸出（如 001.jpg / 001.png）
+            # convert = True  -> raw 保留原始 filename，轉檔資料夾依副檔名或 convert_format 轉換輸出
             # convert = False -> 不寫死副檔名，直接保留伺服器回傳的原始 filename
             if self._convert:
                 converted_filename, pil_format = self._resolve_output_names(filename)
@@ -227,6 +246,7 @@ class manhuagui_comic:
             yield (page_url, display_filename, length, i)
             
             success = False
+            downloaded_new = False
             max_retry = 10
             for retry in range(max_retry):
                 res = None
@@ -235,20 +255,22 @@ class manhuagui_comic:
                     file_path = os.path.join(rawfolder, filename)
                     converted_path = os.path.join(jpgfolder, converted_filename) if self._convert else None
 
-                    if self._skip_existed:
-                        if self._convert and os.path.isfile(file_path) and os.path.isfile(converted_path):
+                    # 先檢查 raw 是否已存在：有 raw 就免重新下載；若開啟 skip_existed 且目標檔都齊就整頁跳過
+                    raw_exists = os.path.isfile(file_path)
+                    if self._skip_existed and raw_exists:
+                        if not self._convert or os.path.isfile(converted_path):
                             success = True
                             break
-                        elif not self._convert and os.path.isfile(file_path):
-                            success = True
-                            break
+
+                    # 只有在 raw 不存在（或未開啟 skip_existed）時才從伺服器下載
+                    if not (self._skip_existed and raw_exists):
+                        res = self._requests_get(page_url, params={'e': e, 'm': m}, headers=HTTP_HEADER, timeout=15)
+                        res.raise_for_status()
                         
-                    res = self._requests_get(page_url, params={'e': e, 'm': m}, headers=HTTP_HEADER, timeout=15)
-                    res.raise_for_status()
-                    
-                    with open(file_path, 'wb') as f:
-                        for chunk in res.iter_content(100000):
-                            f.write(chunk)
+                        with open(file_path, 'wb') as f:
+                            for chunk in res.iter_content(100000):
+                                f.write(chunk)
+                        downloaded_new = True
                             
                     if self._convert:
                         im = Image.open(file_path)
@@ -258,6 +280,9 @@ class manhuagui_comic:
                         im.save(converted_path, pil_format)
                         
                     success = True
+                    # 若只是用本地 raw 補轉檔而沒有發起網絡請求，可不用再額外 sleep page_delay
+                    if not downloaded_new:
+                        break
                     break
                 except Exception as err:
                     status_code = res.status_code if res is not None else 'ERROR'
@@ -281,7 +306,8 @@ class manhuagui_comic:
             if not success:
                 raise Exception(f'Network error: Failed to download page {display_filename}')
                 
-            time.sleep(self._page_delay)
+            if downloaded_new:
+                time.sleep(self._page_delay)
 
     def download_chapter(self, index, callback=None, by='chapters', section=None):
         """Download a chapter, by index in chapters or section.chapters

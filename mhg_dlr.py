@@ -19,6 +19,7 @@ manhuagui_book = manhuagui.manhuagui_comic(checked_id
     # proxies: list = None,
     # proxy_config: dict = { 'mode': 'none','verify': True },
     # convert: bool = True,
+    convert_format = 'jpg',
     # tunnel: int = 0,
     skip_existed = True,
     page_delay = 0.5
