@@ -37,7 +37,7 @@ class manhuagui_comic:
         
         self._bid = bid # book id
         self._url = self._comic_url_base + str(bid) + '/' # comic url
-        self._convert = convert # convert to jpg
+        self._convert = convert # convert image according to extension
         self._page_delay = page_delay # delay between pages
 
         try:
@@ -149,6 +149,37 @@ class manhuagui_comic:
         m = re.match(r'^.*\}\(\'(.*)\',(\d*),(\d*),\'([\w|\+|\/|=]*)\'.*$', res.text)
         return _packed(m.group(1), int(m.group(2)), int(m.group(3)), lz.decompressFromBase64(m.group(4)).split('|'))
 
+    def _resolve_output_names(self, filename):
+        # 拆解伺服器回傳 filename 嘅副檔名層級（例如 001.jpg.webp / 001.png.webp / 001.webp / 001.avif）
+        stem, outer_ext = os.path.splitext(filename)
+        inner_stem, inner_ext = os.path.splitext(stem)
+
+        # 常見圖片副檔名對應 Pillow format
+        ext_to_pil = {
+            '.jpg': 'JPEG',
+            '.jpeg': 'JPEG',
+            '.png': 'PNG',
+            '.webp': 'WEBP',
+            '.gif': 'GIF',
+            '.bmp': 'BMP',
+            '.tiff': 'TIFF',
+            '.tif': 'TIFF',
+            '.avif': 'AVIF',
+        }
+
+        if inner_ext.lower() in ext_to_pil:
+            # 雙層副檔名情況（例如 001.jpg.webp 或 001.png.webp）：跟隨內層副檔名轉換
+            base_name = inner_stem
+            target_ext = inner_ext.lower()
+        else:
+            # 單層副檔名情況（例如 001.webp 或 001.avif）：convert=True 時預設轉為 .jpg
+            base_name = stem
+            target_ext = '.jpg'
+
+        pil_format = ext_to_pil.get(target_ext, 'JPEG')
+        converted_filename = base_name + target_ext
+        return converted_filename, pil_format
+
     def _download_chapter(self, url : str):
         # load chapter info
         chapter_info = self._get_chapter_struct(url)
@@ -182,28 +213,35 @@ class manhuagui_comic:
         # download pages
         for i, filename in enumerate(chapter_info['files']):
             page_url = self._tunnel + path + filename
-            
-            # 清理檔名副檔名（將類似 152.jpg.webp 的髒檔名剝除乾淨）
-            base_filename = os.path.splitext(filename)[0]
-            while os.path.splitext(base_filename)[1]:
-                base_filename = os.path.splitext(base_filename)[0]
 
+            # 根據 convert 設定決定檔名：
+            # convert = True  -> raw 保留原始 filename，jpgfolder 依副檔名轉換輸出（如 001.jpg / 001.png）
+            # convert = False -> 不寫死副檔名，直接保留伺服器回傳的原始 filename
             if self._convert:
-                clean_filename = base_filename
+                converted_filename, pil_format = self._resolve_output_names(filename)
+                display_filename = converted_filename
             else:
-                clean_filename = base_filename + '.webp'
+                converted_filename, pil_format = None, None
+                display_filename = filename
 
-            yield (page_url, clean_filename, length, i)
+            yield (page_url, display_filename, length, i)
             
             success = False
             max_retry = 10
             for retry in range(max_retry):
                 res = None
                 try:
-                    file_path = os.path.join(rawfolder, clean_filename)
-                    if self._skip_existed and os.path.isfile(file_path):
-                        success = True
-                        break
+                    # rawfolder 永遠使用伺服器原始 filename，避免假設副檔名一定是 .webp
+                    file_path = os.path.join(rawfolder, filename)
+                    converted_path = os.path.join(jpgfolder, converted_filename) if self._convert else None
+
+                    if self._skip_existed:
+                        if self._convert and os.path.isfile(file_path) and os.path.isfile(converted_path):
+                            success = True
+                            break
+                        elif not self._convert and os.path.isfile(file_path):
+                            success = True
+                            break
                         
                     res = self._requests_get(page_url, params={'e': e, 'm': m}, headers=HTTP_HEADER, timeout=15)
                     res.raise_for_status()
@@ -214,13 +252,16 @@ class manhuagui_comic:
                             
                     if self._convert:
                         im = Image.open(file_path)
-                        im.save(os.path.join(jpgfolder, base_filename + '.jpg'), 'jpeg')
+                        # 若目標格式為 JPEG 但原圖帶有透明通道（如 RGBA / P），先轉為 RGB 避免存檔報錯
+                        if pil_format == 'JPEG' and im.mode in ('RGBA', 'LA', 'P'):
+                            im = im.convert('RGB')
+                        im.save(converted_path, pil_format)
                         
                     success = True
                     break
                 except Exception as err:
                     status_code = res.status_code if res is not None else 'ERROR'
-                    print(f"Page {clean_filename} download failed: {status_code} Retry: ({retry + 1}/{max_retry})...")
+                    print(f"Page {display_filename} download failed: {status_code} Retry: ({retry + 1}/{max_retry})...")
                     
                     if retry == 2:
                         print("-> 偵測到 Token 可能過期，正在重新取得最新 e & m 參數...")
@@ -238,7 +279,7 @@ class manhuagui_comic:
                     time.sleep(2)
             
             if not success:
-                raise Exception(f'Network error: Failed to download page {clean_filename}')
+                raise Exception(f'Network error: Failed to download page {display_filename}')
                 
             time.sleep(self._page_delay)
 
